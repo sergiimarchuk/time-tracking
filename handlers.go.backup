@@ -1,0 +1,497 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/gin-contrib/sessions"
+	"github.com/gin-gonic/gin"
+	"github.com/xuri/excelize/v2"
+)
+
+// Home page
+func HomePage(c *gin.Context) {
+	c.HTML(http.StatusOK, "index.html", gin.H{
+		"title": "Work Time Tracker",
+	})
+}
+
+// Login page
+func LoginPage(c *gin.Context) {
+	timeout := c.Query("timeout")
+
+	c.HTML(http.StatusOK, "login.html", gin.H{
+		"timeout": timeout == "1",
+	})
+}
+
+// Login handler
+func LoginHandler(c *gin.Context) {
+	username := c.PostForm("username")
+	password := c.PostForm("password")
+
+	user, err := GetUserByUsername(username)
+	if err != nil {
+		c.HTML(http.StatusOK, "login.html", gin.H{
+			"error": "Invalid username or password",
+		})
+		return
+	}
+
+	if !CheckPassword(password, user.Password) {
+		c.HTML(http.StatusOK, "login.html", gin.H{
+			"error": "Invalid username or password",
+		})
+		return
+	}
+
+	// Save to session
+	session := sessions.Default(c)
+	session.Set("user_id", user.ID)
+	session.Set("username", user.Username)
+	session.Save()
+
+	c.Redirect(http.StatusFound, "/dashboard")
+}
+
+// Dashboard (main page after login)
+func DashboardPage(c *gin.Context) {
+	username := GetCurrentUsername(c)
+
+	c.HTML(http.StatusOK, "dashboard.html", gin.H{
+		"username": username,
+	})
+}
+
+// New work log form
+func NewWorkLogPage(c *gin.Context) {
+	c.HTML(http.StatusOK, "new_worklog.html", gin.H{})
+}
+
+// CreateWorkLogHandler - UNIFIED VERSION (minutes only)
+func CreateWorkLogHandler(c *gin.Context) {
+	date := c.PostForm("date")
+	description := c.PostForm("description")
+	minutesStr := c.PostForm("minutes") // Always receive minutes
+
+	userID := GetCurrentUserID(c)
+
+	// Parse minutes (primary data)
+	var totalMinutes int
+	_, err := fmt.Sscanf(minutesStr, "%d", &totalMinutes)
+
+	if err != nil || totalMinutes <= 0 {
+		username := GetCurrentUsername(c)
+		pref, _ := LoadUserPreference(username)
+
+		c.HTML(http.StatusOK, "new_worklog_v2.html", gin.H{
+			"error":              "Invalid time value",
+			"username":           username,
+			"workingMode":        pref.WorkingMode,
+			"defaultDescription": pref.DefaultDescription,
+		})
+		return
+	}
+
+	// Calculate hours for display/compatibility
+	hoursDecimal := float64(totalMinutes) / 60.0
+
+	// Save to database (minutes is PRIMARY, hours is calculated)
+	_, err = db.Exec(
+		"INSERT INTO worklogs (user_id, date, description, hours, minutes) VALUES (?, ?, ?, ?, ?)",
+		userID, date, description, hoursDecimal, totalMinutes,
+	)
+
+	if err != nil {
+		username := GetCurrentUsername(c)
+		pref, _ := LoadUserPreference(username)
+
+		c.HTML(http.StatusOK, "new_worklog_v2.html", gin.H{
+			"error":              "Save error: " + err.Error(),
+			"username":           username,
+			"workingMode":        pref.WorkingMode,
+			"defaultDescription": pref.DefaultDescription,
+		})
+		return
+	}
+
+	c.Redirect(http.StatusFound, "/worklog/new?success=1")
+}
+
+// WorkLogListPage - UNIFIED VERSION (show minutes)
+func WorkLogListPage(c *gin.Context) {
+	userID := GetCurrentUserID(c)
+
+	dateFrom := c.Query("date_from")
+	dateTo := c.Query("date_to")
+	search := c.Query("search")
+
+	// Query includes minutes as primary field
+	query := `SELECT id, date, description, hours, COALESCE(minutes, 0) FROM worklogs WHERE user_id = ?`
+	args := []interface{}{userID}
+
+	if dateFrom != "" {
+		query += ` AND date >= ?`
+		args = append(args, dateFrom)
+	}
+
+	if dateTo != "" {
+		query += ` AND date <= ?`
+		args = append(args, dateTo)
+	}
+
+	if search != "" {
+		query += ` AND description LIKE ?`
+		args = append(args, "%"+search+"%")
+	}
+
+	query += ` ORDER BY date DESC`
+
+	rows, err := db.Query(query, args...)
+
+	if err != nil {
+		c.HTML(http.StatusOK, "worklog_list.html", gin.H{
+			"error": "Error loading data",
+		})
+		return
+	}
+	defer rows.Close()
+
+	var logs []WorkLog
+	var totalMinutes int
+
+	for rows.Next() {
+		var log WorkLog
+		var dateStr string
+		var minutes int
+
+		rows.Scan(&log.ID, &dateStr, &log.Description, &log.Hours, &minutes)
+
+		log.Date, _ = time.Parse("2006-01-02", dateStr)
+		log.Minutes = minutes
+		logs = append(logs, log)
+		totalMinutes += minutes
+	}
+
+	// Calculate summary (from minutes!)
+	totalHours := float64(totalMinutes) / 60.0
+	totalHoursInt := totalMinutes / 60
+	totalMinutesRem := totalMinutes % 60
+
+	c.HTML(http.StatusOK, "worklog_list.html", gin.H{
+		"logs":            logs,
+		"dateFrom":        dateFrom,
+		"dateTo":          dateTo,
+		"search":          search,
+		"totalMinutes":    totalMinutes,
+		"totalHours":      totalHours,
+		"totalHoursInt":   totalHoursInt,
+		"totalMinutesRem": totalMinutesRem,
+	})
+}
+
+// ReportsPage - UNIFIED VERSION (calculate from minutes)
+func ReportsPage(c *gin.Context) {
+	userID := GetCurrentUserID(c)
+
+	// Query minutes directly
+	rows, err := db.Query(`
+		SELECT date, COALESCE(minutes, 0) as minutes
+		FROM worklogs 
+		WHERE user_id = ? 
+		ORDER BY date ASC
+	`, userID)
+
+	if err != nil {
+		c.HTML(http.StatusOK, "reports.html", gin.H{
+			"error": "Error loading data",
+		})
+		return
+	}
+	defer rows.Close()
+
+	var dates []string
+	var hours []float64
+	var totalMinutes int
+
+	// Group by months (in minutes)
+	monthsMap := make(map[string]int)
+	// Group by weeks (in minutes)
+	weeksMap := make(map[string]int)
+
+	for rows.Next() {
+		var date string
+		var minutes int
+		rows.Scan(&date, &minutes)
+
+		t, _ := time.Parse("2006-01-02", date)
+
+		// Daily data (convert to hours for chart)
+		dates = append(dates, t.Format("02.01"))
+		hours = append(hours, float64(minutes)/60.0)
+		totalMinutes += minutes
+
+		// Monthly grouping (in minutes!)
+		monthKey := t.Format("2006-01")
+		monthsMap[monthKey] += minutes
+
+		// Weekly grouping (in minutes!)
+		year, week := t.ISOWeek()
+		weekKey := fmt.Sprintf("%d-W%02d", year, week)
+		weeksMap[weekKey] += minutes
+	}
+
+	// Convert monthly totals to hours for display
+	var months []string
+	var monthHours []float64
+	for month, mins := range monthsMap {
+		t, _ := time.Parse("2006-01", month)
+		months = append(months, t.Format("01/2006"))
+		monthHours = append(monthHours, float64(mins)/60.0)
+	}
+
+	// Convert weekly totals to hours for display
+	var weeks []string
+	var weekHours []float64
+	for week, mins := range weeksMap {
+		weeks = append(weeks, week)
+		weekHours = append(weekHours, float64(mins)/60.0)
+	}
+
+	// Calculate averages from minutes
+	totalHours := float64(totalMinutes) / 60.0
+	avgMinutes := 0
+	if len(dates) > 0 {
+		avgMinutes = totalMinutes / len(dates)
+	}
+	avgHours := float64(avgMinutes) / 60.0
+
+	c.HTML(http.StatusOK, "reports.html", gin.H{
+		"dates":        dates,
+		"hours":        hours,
+		"months":       months,
+		"monthHours":   monthHours,
+		"weeks":        weeks,
+		"weekHours":    weekHours,
+		"totalMinutes": totalMinutes,
+		"totalHours":   totalHours,
+		"avgMinutes":   avgMinutes,
+		"avgHours":     avgHours,
+		"daysCount":    len(dates),
+	})
+}
+
+// EditWorkLogPage - UNIFIED VERSION
+func EditWorkLogPage(c *gin.Context) {
+	id := c.Param("id")
+
+	var log WorkLog
+	var dateStr string
+	var minutes int
+
+	err := db.QueryRow(
+		"SELECT id, date, description, hours, COALESCE(minutes, 0) FROM worklogs WHERE id = ?",
+		id,
+	).Scan(&log.ID, &dateStr, &log.Description, &log.Hours, &minutes)
+
+	if err != nil {
+		c.Redirect(http.StatusFound, "/worklog/list")
+		return
+	}
+
+	log.Date, _ = time.Parse("2006-01-02", dateStr)
+	log.Minutes = minutes
+
+	c.HTML(http.StatusOK, "edit_worklog.html", gin.H{
+		"log": log,
+	})
+}
+
+// UpdateWorkLogHandler - UNIFIED VERSION
+func UpdateWorkLogHandler(c *gin.Context) {
+	id := c.Param("id")
+	date := c.PostForm("date")
+	description := c.PostForm("description")
+	minutesStr := c.PostForm("minutes")
+
+	// Parse minutes
+	var totalMinutes int
+	fmt.Sscanf(minutesStr, "%d", &totalMinutes)
+
+	// Calculate hours
+	hoursDecimal := float64(totalMinutes) / 60.0
+
+	_, err := db.Exec(
+		"UPDATE worklogs SET date = ?, description = ?, hours = ?, minutes = ? WHERE id = ?",
+		date, description, hoursDecimal, totalMinutes, id,
+	)
+
+	if err != nil {
+		c.HTML(http.StatusOK, "edit_worklog.html", gin.H{
+			"error": "Update error",
+		})
+		return
+	}
+
+	c.Redirect(http.StatusFound, "/worklog/list")
+}
+
+// Delete work log
+func DeleteWorkLogHandler(c *gin.Context) {
+	id := c.Param("id")
+
+	_, err := db.Exec("DELETE FROM worklogs WHERE id = ?", id)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Delete error")
+		return
+	}
+
+	c.Redirect(http.StatusFound, "/worklog/list")
+}
+
+// Logout
+func LogoutHandler(c *gin.Context) {
+	session := sessions.Default(c)
+	session.Clear()
+	session.Save()
+
+	c.Redirect(http.StatusFound, "/login")
+}
+
+// ExportWorkLogHandler - UNIFIED VERSION (show minutes in Excel)
+func ExportWorkLogHandler(c *gin.Context) {
+	userID := GetCurrentUserID(c)
+	username := GetCurrentUsername(c)
+	dateFrom := c.Query("date_from")
+	dateTo := c.Query("date_to")
+	search := c.Query("search")
+
+	query := `SELECT date, description, hours, COALESCE(minutes, 0) FROM worklogs WHERE user_id = ?`
+	args := []interface{}{userID}
+
+	if dateFrom != "" {
+		query += ` AND date >= ?`
+		args = append(args, dateFrom)
+	}
+	if dateTo != "" {
+		query += ` AND date <= ?`
+		args = append(args, dateTo)
+	}
+	if search != "" {
+		query += ` AND description LIKE ?`
+		args = append(args, "%"+search+"%")
+	}
+
+	query += ` ORDER BY date DESC`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error fetching data")
+		return
+	}
+	defer rows.Close()
+
+	f := excelize.NewFile()
+	sheetName := "Work Hours"
+	index, _ := f.NewSheet(sheetName)
+
+	// Headers
+	f.SetCellValue(sheetName, "A1", "Date")
+	f.SetCellValue(sheetName, "B1", "Description")
+	f.SetCellValue(sheetName, "C1", "Minutes")
+	f.SetCellValue(sheetName, "D1", "Hours")
+
+	row := 2
+	totalMinutes := 0
+
+	for rows.Next() {
+		var date, description string
+		var hours float64
+		var minutes int
+		rows.Scan(&date, &description, &hours, &minutes)
+
+		t, _ := time.Parse("2006-01-02", date)
+		f.SetCellValue(sheetName, "A"+fmt.Sprintf("%d", row), t.Format("02.01.2006"))
+		f.SetCellValue(sheetName, "B"+fmt.Sprintf("%d", row), description)
+		f.SetCellValue(sheetName, "C"+fmt.Sprintf("%d", row), minutes)
+		f.SetCellValue(sheetName, "D"+fmt.Sprintf("%d", row), hours)
+
+		totalMinutes += minutes
+		row++
+	}
+
+	// Totals
+	row++
+	totalHours := float64(totalMinutes) / 60.0
+	f.SetCellValue(sheetName, "B"+fmt.Sprintf("%d", row), "TOTAL:")
+	f.SetCellValue(sheetName, "C"+fmt.Sprintf("%d", row), totalMinutes)
+	f.SetCellValue(sheetName, "D"+fmt.Sprintf("%d", row), totalHours)
+
+	f.SetActiveSheet(index)
+	f.DeleteSheet("Sheet1")
+
+	fileName := fmt.Sprintf("worklog_%s_%s.xlsx", username, time.Now().Format("2006-01-02"))
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", "attachment; filename="+fileName)
+
+	if err := f.Write(c.Writer); err != nil {
+		c.String(http.StatusInternalServerError, "File creation error")
+	}
+}
+
+// Registration page
+func RegisterPage(c *gin.Context) {
+	c.HTML(http.StatusOK, "register.html", gin.H{})
+}
+
+// Registration handler
+func RegisterHandler(c *gin.Context) {
+	username := c.PostForm("username")
+	password := c.PostForm("password")
+	passwordConfirm := c.PostForm("password_confirm")
+	if username == "" || password == "" {
+		c.HTML(http.StatusOK, "register.html", gin.H{
+			"error": "Please fill in all fields",
+		})
+		return
+	}
+	if len(username) < 3 {
+		c.HTML(http.StatusOK, "register.html", gin.H{
+			"error": "Username must be at least 3 characters long",
+		})
+		return
+	}
+	if len(password) < 6 {
+		c.HTML(http.StatusOK, "register.html", gin.H{
+			"error": "Password must be at least 6 characters long",
+		})
+		return
+	}
+	if password != passwordConfirm {
+		c.HTML(http.StatusOK, "register.html", gin.H{
+			"error": "Passwords do not match",
+		})
+		return
+	}
+	existingUser, _ := GetUserByUsername(username)
+	if existingUser != nil {
+		c.HTML(http.StatusOK, "register.html", gin.H{
+			"error": "User with this username already exists",
+		})
+		return
+	}
+	err := CreateUser(username, password)
+	if err != nil {
+		c.HTML(http.StatusOK, "register.html", gin.H{
+			"error": "User creation error: " + err.Error(),
+		})
+		return
+	}
+	user, _ := GetUserByUsername(username)
+	session := sessions.Default(c)
+	session.Set("user_id", user.ID)
+	session.Set("username", user.Username)
+	session.Save()
+	c.Redirect(http.StatusFound, "/dashboard")
+}

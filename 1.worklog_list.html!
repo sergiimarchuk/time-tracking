@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Мои записи</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #667eea;
+            color: white;
+            padding: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .header a {
+            color: white;
+            text-decoration: none;
+            margin-right: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 40px auto;
+            padding: 0 20px;
+        }
+        h2 {
+            margin-bottom: 30px;
+            color: #333;
+        }
+        .log-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 15px;
+            display: grid;
+            grid-template-columns: 120px 1fr 80px 200px;
+            gap: 20px;
+            align-items: center;
+        }
+        .log-date {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 16px;
+        }
+        .log-description {
+            color: #555;
+        }
+        .log-hours {
+            text-align: right;
+            font-size: 20px;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        .actions {
+            display: flex;
+            gap: 10px;
+        }
+        .btn-edit {
+            padding: 8px 15px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 14px;
+            display: inline-block;
+        }
+        .btn-edit:hover {
+            background: #5568d3;
+        }
+        .btn-delete {
+            padding: 8px 15px;
+            background: #ff4444;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-delete:hover {
+            background: #cc0000;
+        }
+        .empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+        .empty a {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 30px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+        }
+        .total {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-top: 30px;
+            text-align: center;
+        }
+        .total h3 {
+            color: #667eea;
+            font-size: 32px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="container">
+            <a href="/dashboard">← Назад</a>
+            <span>Мои записи</span>
+        </div>
+    </div>
+    
+    <div class="container">
+        <h2>📋 История работы</h2>
+        
+        {{if .logs}}
+            {{range .logs}}
+            <div class="log-card">
+                <div class="log-date">
+                    {{.Date.Format "02.01.2006"}}
+                </div>
+                <div class="log-description">
+                    {{.Description}}
+                </div>
+                <div class="log-hours">
+                    {{.Hours}}ч
+                </div>
+                <div class="actions">
+                    <a href="/worklog/edit/{{.ID}}" class="btn-edit">✏️ Редактировать</a>
+                    <form method="POST" action="/worklog/delete/{{.ID}}" style="margin: 0;" onsubmit="return confirm('Удалить эту запись?')">
+                        <button type="submit" class="btn-delete">🗑️ Удалить</button>
+                    </form>
+                </div>
+            </div>
+            {{end}}
+            
+            <div class="total">
+                <p>Всего записей: <strong>{{len .logs}}</strong></p>
+                <h3>
+                    {{$total := 0.0}}
+                    {{range .logs}}
+                        {{$total = add $total .Hours}}
+                    {{end}}
+                    {{$total}} часов
+                </h3>
+            </div>
+        {{else}}
+            <div class="empty">
+                <h3>📭 Пока нет записей</h3>
+                <p>Добавь свою первую запись рабочего дня</p>
+                <a href="/worklog/new">➕ Добавить запись</a>
+            </div>
+        {{end}}
+    </div>
+</body>
+</html>

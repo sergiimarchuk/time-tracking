@@ -1,0 +1,49 @@
+version: '3.8'
+services:
+  worklog-tracker:
+    build: .
+    container_name: worklog-tracker
+    restart: always
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - worklog-data:/app/data  # ← Используй named volume вместо ./data
+    environment:
+      - GIN_MODE=release
+      - TZ=Europe/Berlin
+      - DATABASE_PATH=/app/data/database.db
+    networks:
+      - worklog-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:alpine
+    container_name: worklog-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-site.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - worklog-tracker
+    networks:
+      - worklog-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  worklog-network:
+    driver: bridge
+
+volumes:
+  worklog-data:  # ← Определяем volume
